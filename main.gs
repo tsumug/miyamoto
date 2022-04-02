@@ -421,9 +421,14 @@ if(typeof exports !== 'undefined') {
 
 loadGSTimesheets = function () {
   var GSTimesheets = function(spreadsheet, settings) {
+    if(!(this instanceof GSTimesheets)) {
+      return new GSTimesheets(spreadsheet, settings);
+    }
+
     this.spreadsheet = spreadsheet;
     this.settings = settings;
     this._sheets = {};
+    this.tetete = "aaaaaa";
 
     this.scheme = {
       columns: [
@@ -434,16 +439,18 @@ loadGSTimesheets = function () {
       ],
       properties: [
         { name: 'DayOff', value: '土,日', comment: '← 月,火,水みたいに入力してください。アカウント停止のためには「全部」と入れてください。'},
+        { name : '名前', value: '', comment: ''},
       ]
     };
   };
 
-  GSTimesheets.prototype._getSheet = function(username) {
-    if(this._sheets[username]) return this._sheets[username];
+  GSTimesheets.prototype._getSheet = function(user_id) {
+    if(this._sheets[user_id]) return this._sheets[user_id];
+    var token = this.settings.get("Slack Bot Token");
 
-    var sheet = this.spreadsheet.getSheetByName(username);
+    var sheet = this.spreadsheet.getSheetByName(user_id);
     if(!sheet) {
-      sheet = this.spreadsheet.insertSheet(username);
+      sheet = this.spreadsheet.insertSheet(user_id);
       if(!sheet) {
         throw "エラー: "+sheetName+"のシートが作れませんでした";
       }
@@ -453,7 +460,12 @@ loadGSTimesheets = function () {
           // 設定部の書き出し
           var properties = [["Properties count", this.scheme.properties.length, null]];
           this.scheme.properties.forEach(function(s) {
-            properties.push([s.name, s.value, s.comment]);
+            if (s.name === '名前') {
+              var username = slackgetName(user_id, token);
+              properties.push([s.name, username, s.comment]);
+            } else {
+              properties.push([s.name, s.value, s.comment]);
+            }
           });
           sheet.getRange("A1:C"+(properties.length)).setValues(properties);
 
@@ -462,16 +474,16 @@ loadGSTimesheets = function () {
           var cols = this.scheme.columns.map(function(c) { return c.name; });
           sheet.getRange("A"+rowNo+":"+String.fromCharCode(65 + cols.length - 1)+rowNo).setValues([cols]);
         }
-        //this.on("newUser", username);
+        //this.on("newUser", user_id);
       }
     }
 
-    this._sheets[username] = sheet;
+    this._sheets[user_id] = sheet;
 
     return sheet;
   };
 
-  GSTimesheets.prototype._getRowNo = function(username, date) {
+  GSTimesheets.prototype._getRowNo = function(user_id, date) {
     if(!date) date = DateUtils.now();
     var rowNo = this.scheme.properties.length + 4;
     var startAt = DateUtils.parseDate(this.settings.get("開始日"));
@@ -480,22 +492,22 @@ loadGSTimesheets = function () {
     return rowNo;
   };
 
-  GSTimesheets.prototype.get = function(username, date) {
-    var sheet = this._getSheet(username);
-    var rowNo = this._getRowNo(username, date);
+  GSTimesheets.prototype.get = function(user_id, date) {
+    var sheet = this._getSheet(user_id);
+    var rowNo = this._getRowNo(user_id, date);
     var row = sheet.getRange("A"+rowNo+":"+String.fromCharCode(65 + this.scheme.columns.length - 1)+rowNo).getValues()[0].map(function(v) {
       return v === '' ? undefined : v;
     });
 
-    return({ user: username, date: row[0], signIn: row[1], signOut: row[2], note: row[3] });
+    return({ user: user_id, date: row[0], signIn: row[1], signOut: row[2], note: row[3] });
   };
 
-  GSTimesheets.prototype.set = function(username, date, params) {
-    var row = this.get(username, date);
+  GSTimesheets.prototype.set = function(user_id, date, params) {
+    var row = this.get(user_id, date);
     _.extend(row, _.pick(params, 'signIn', 'signOut', 'note'));
 
-    var sheet = this._getSheet(username);
-    var rowNo = this._getRowNo(username, date);
+    var sheet = this._getSheet(user_id);
+    var rowNo = this._getRowNo(user_id, date);
 
     var data = [DateUtils.toDate(date), row.signIn, row.signOut, row.note].map(function(v) {
       return v == null ? '' : v;
@@ -514,14 +526,14 @@ loadGSTimesheets = function () {
 
   GSTimesheets.prototype.getByDate = function(date) {
     var self = this;
-    return _.map(this.getUsers(), function(username) {
-      return self.get(username, date);
+    return _.map(this.getUsers(), function(user_id) {
+      return self.get(user_id, date);
     });
   };
 
   // 休みの曜日を数字で返す
-  GSTimesheets.prototype.getDayOff = function(username) {
-    var sheet = this._getSheet(username);
+  GSTimesheets.prototype.getDayOff = function(user_id) {
+    var sheet = this._getSheet(user_id);
     return DateUtils.parseWday(sheet.getRange("B2").getValue());
   };
 
@@ -567,8 +579,20 @@ var init = function() {
 
 // SlackのOutgoingから来るメッセージ
 function doPost(e) {
-  var miyamoto = init();
-  miyamoto.receiver.receiveMessage(e.parameters);
+  var data = JSON.parse(e.postData.getDataAsString());
+  console.log(data);
+
+  if (data.type === 'url_verification') {
+    return ContentService.createTextOutput(data.challenge);
+  } else if (data.type === 'event_callback') {
+    if (data.event.type === 'message') {
+      if (data.event.subtype === 'bot_message') {
+        return;
+      }
+      var miyamoto = init();
+      miyamoto.receiver.receiveMessage(data.event);
+    }
+  }
 }
 
 // Time-based triggerで実行
@@ -583,6 +607,14 @@ function confirmSignOut() {
   miyamoto.timesheets.confirmSignOut();
 }
 
+function deleteAllProperties() {
+  //スクリプトプロパティを取得
+  const scriptProperties = PropertiesService.getScriptProperties();
+  console.log(scriptProperties);
+
+  //設定されている全プロパティを削除
+  scriptProperties.deleteAllProperties();
+}
 
 // 初期化する
 function setUp() {
@@ -591,7 +623,6 @@ function setUp() {
   // spreadsheetが無かったら初期化
   var global_settings = new GASProperties();
   if(!global_settings.get('spreadsheet')) {
-
     // タイムシートを作る
     var spreadsheet = SpreadsheetApp.create("Slack Timesheets");
     var sheets = spreadsheet.getSheets();
@@ -602,11 +633,13 @@ function setUp() {
 
     var settings = new GSProperties(spreadsheet);
     settings.set('Slack Incoming URL', '');
-    settings.setNote('Slack Incoming URL', 'Slackのincoming URLを入力してください');
+    settings.setNote('Slack Incoming URL', 'Slack のincoming URLを入力してください');
+    settings.set('Slack Bot Token', '');
+    settings.setNote('Slack Bot Token', 'SlackのBot Tokenを入力してください');
     settings.set('開始日', DateUtils.format("Y-m-d", DateUtils.now()));
     settings.setNote('開始日', '変更はしないでください');
-    settings.set('無視するユーザ', 'miyamoto,hubot,slackbot,incoming-webhook');
-    settings.setNote('無視するユーザ', '反応をしないユーザを,区切りで設定する。botは必ず指定してください。');
+    settings.set('無視するユーザID', '');
+    settings.setNote('無視するユーザID', '反応をしないユーザを,区切りで設定する。botは必ず指定してください。');
 
     // 休日を設定 (iCal)
     var calendarId = 'ja.japanese#holiday@group.v.calendar.google.com';
@@ -647,14 +680,6 @@ function migrate() {
   console.log("バージョンアップが完了しました。");
 }
 
-
-
-/*
-function test1(e) {
-  var miyamoto = init();
-  miyamoto.receiver.receiveMessage({user_name:"masuidrive", text:"hello 8:00"});
-}
-*/
 // Slackのインタフェース
 // Slack = loadSlack();
 
@@ -669,19 +694,19 @@ loadSlack = function () {
   if(typeof EventListener === 'undefined') EventListener = loadEventListener();
   _.extend(Slack.prototype, EventListener.prototype);
 
-  // 受信したメッセージをtimesheetsに投げる
+  // 受信したメッセージをtimesheetsに投げる // TODO
   Slack.prototype.receiveMessage = function(message) {
-    var username = String(message.user_name);
-    var body = String(message['text']);
+    var user_id = String(message.user);
+    var body = String(message.text);
 
     // 特定のアカウントには反応しない
-    var ignore_users = (this.settings.get("無視するユーザ") || '').toLowerCase().replace(/^\s*(.*?)\s*$/, "$1").split(/\s*,\s*/);
-    if(_.contains(ignore_users, username.toLowerCase())) return;
+    var ignore_user_ids = (this.settings.get("無視するユーザID") || '').toLowerCase().replace(/^\s*(.*?)\s*$/, "$1").split(/\s*,\s*/);
+    if(_.contains(ignore_user_ids, user_id.toLowerCase())) return;
 
     // -で始まるメッセージも無視
     if(body.match(/^-/)) return;
 
-    this.fireEvent('receiveMessage', username, body);
+    this.fireEvent('receiveMessage', user_id, body);
   };
 
   // メッセージ送信
@@ -712,8 +737,29 @@ loadSlack = function () {
 if(typeof exports !== 'undefined') {
   exports.Slack = loadSlack();
 }
-// 入力内容を解析して、メソッドを呼び出す
-// Timesheets = loadTimesheets();
+
+
+// Slackのユーザーネームを取得 // TODO
+var slackgetName = function(user_id, token) {
+  var payload = {
+    "token": token,
+    "user": user_id,
+  };
+  var option = {
+    "method": "GET",
+    "payload": payload,
+    "muteHttpExceptions": true
+  };
+
+  try {
+    var response = UrlFetchApp.fetch("https://slack.com/api/users.info", option);
+    var user_data = JSON.parse(response.getContentText());
+    return user_data.user.real_name;
+  } catch(e) {
+    console.log(e);
+    return;
+  }
+}
 
 loadTimesheets = function (exports) {
   var Timesheets = function(storage, settings, responder) {
@@ -722,13 +768,13 @@ loadTimesheets = function (exports) {
     this.settings = settings;
 
     var self = this;
-    this.responder.on('receiveMessage', function(username, message) {
-      self.receiveMessage(username, message);
+    this.responder.on('receiveMessage', function(user_id, message) {
+      self.receiveMessage(user_id, message);
     });
   };
 
   // メッセージを受信する
-  Timesheets.prototype.receiveMessage = function(username, message) {
+  Timesheets.prototype.receiveMessage = function(user_id, message) {
     // 日付は先に処理しておく
     this.date = DateUtils.parseDate(message);
     this.time = DateUtils.parseTime(message);
@@ -757,75 +803,76 @@ loadTimesheets = function (exports) {
 
     // メッセージを実行
     if(command && this[command[0]]) {
-      return this[command[0]](username, message);
+      return this[command[0]](user_id, message);
     }
   }
 
   // 出勤
-  Timesheets.prototype.actionSignIn = function(username, message) {
+  Timesheets.prototype.actionSignIn = function(user_id, message) {
     if(this.datetime) {
-      var data = this.storage.get(username, this.datetime);
+      var data = this.storage.get(user_id, this.datetime);
       if(!data.signIn || data.signIn === '-') {
-        this.storage.set(username, this.datetime, {signIn: this.datetime});
-        this.responder.template("出勤", username, this.datetimeStr);
+        this.storage.set(user_id, this.datetime, {signIn: this.datetime});
+        this.responder.template("出勤", user_id, this.datetimeStr);
       }
       else {
         // 更新の場合は時間を明示する必要がある
         if(!!this.time) {
-          this.storage.set(username, this.datetime, {signIn: this.datetime});
-          this.responder.template("出勤更新", username, this.datetimeStr);
+          this.storage.set(user_id, this.datetime, {signIn: this.datetime});
+          this.responder.template("出勤更新", user_id, this.datetimeStr);
         }
       }
     }
   };
 
   // 退勤
-  Timesheets.prototype.actionSignOut = function(username, message) {
+  Timesheets.prototype.actionSignOut = function(user_id, message) {
     if(this.datetime) {
-      var data = this.storage.get(username, this.datetime);
+      var data = this.storage.get(user_id, this.datetime);
       if(!data.signOut || data.signOut === '-') {
-        this.storage.set(username, this.datetime, {signOut: this.datetime});
-        this.responder.template("退勤", username, this.datetimeStr);
+        this.storage.set(user_id, this.datetime, {signOut: this.datetime});
+        this.responder.template("退勤", user_id, this.datetimeStr);
       }
       else {
         // 更新の場合は時間を明示する必要がある
         if(!!this.time) {
-          this.storage.set(username, this.datetime, {signOut: this.datetime});
-          this.responder.template("退勤更新", username, this.datetimeStr);
+          this.storage.set(user_id, this.datetime, {signOut: this.datetime});
+          this.responder.template("退勤更新", user_id, this.datetimeStr);
         }
       }
     }
   };
 
   // 休暇申請
-  Timesheets.prototype.actionOff = function(username, message) {
+  Timesheets.prototype.actionOff = function(user_id, message) {
     if(this.date) {
       var dateObj = new Date(this.date[0], this.date[1]-1, this.date[2]);
-      var data = this.storage.get(username, dateObj);
+      var data = this.storage.get(user_id, dateObj);
       if(!data.signOut || data.signOut === '-') {
-        this.storage.set(username, dateObj, {signIn: '-', signOut: '-', note: message});
-        this.responder.template("休暇", username, DateUtils.format("Y/m/d", dateObj));
+        this.storage.set(user_id, dateObj, {signIn: '-', signOut: '-', note: message});
+        this.responder.template("休暇", user_id, DateUtils.format("Y/m/d", dateObj));
       }
     }
   };
 
   // 休暇取消
-  Timesheets.prototype.actionCancelOff = function(username, message) {
+  Timesheets.prototype.actionCancelOff = function(user_id, message) {
     if(this.date) {
       var dateObj = new Date(this.date[0], this.date[1]-1, this.date[2]);
-      var data = this.storage.get(username, dateObj);
+      var data = this.storage.get(user_id, dateObj);
       if(!data.signOut || data.signOut === '-') {
-        this.storage.set(username, dateObj, {signIn: null, signOut: null, note: message});
-        this.responder.template("休暇取消", username, DateUtils.format("Y/m/d", dateObj));
+        this.storage.set(user_id, dateObj, {signIn: null, signOut: null, note: message});
+        this.responder.template("休暇取消", user_id, DateUtils.format("Y/m/d", dateObj));
       }
     }
   };
 
   // 出勤中
-  Timesheets.prototype.actionWhoIsIn = function(username, message) {
+  Timesheets.prototype.actionWhoIsIn = function(user_id, message) {
+    var token = this.storage.settings.get("Slack Bot Token");
     var dateObj = DateUtils.toDate(DateUtils.now());
     var result = _.compact(_.map(this.storage.getByDate(dateObj), function(row) {
-      return _.isDate(row.signIn) && !_.isDate(row.signOut) ? row.user : undefined;
+      return _.isDate(row.signIn) && !_.isDate(row.signOut) ? slackgetName(row.user, token) : undefined;
     }));
 
     if(_.isEmpty(result)) {
@@ -837,19 +884,20 @@ loadTimesheets = function (exports) {
   };
 
   // 休暇中
-  Timesheets.prototype.actionWhoIsOff = function(username, message) {
+  Timesheets.prototype.actionWhoIsOff = function(user_id, message) {
+    var token = this.storage.settings.get("Slack Bot Token");
     var dateObj = DateUtils.toDate(DateUtils.now());
     var dateStr = DateUtils.format("Y/m/d", dateObj);
     var result = _.compact(_.map(this.storage.getByDate(dateObj), function(row){
-      return row.signIn === '-' ? row.user : undefined;
+      return row.signIn === '-' ? slackgetName(user_id, token) : undefined;
     }));
 
     // 定休の処理
     var wday = dateObj.getDay();
     var self = this;
-    _.each(this.storage.getUsers(), function(username) {
-      if(_.contains(self.storage.getDayOff(username), wday)) {
-        result.push(username);
+    _.each(this.storage.getUsers(), function(user_id) {
+      if(_.contains(self.storage.getDayOff(user_id), wday)) {
+        result.push(user_id);
       }
     });
     result = _.uniq(result);
@@ -863,7 +911,7 @@ loadTimesheets = function (exports) {
   };
 
   // 出勤していない人にメッセージを送る
-  Timesheets.prototype.confirmSignIn = function(username, message) {
+  Timesheets.prototype.confirmSignIn = function(user_id, message) {
     var self = this;
     var holidays = _.compact(_.map((this.settings.get("休日") || "").split(','), function(s) {
       var date = DateUtils.parseDateTime(s);
@@ -891,7 +939,7 @@ loadTimesheets = function (exports) {
   };
 
   // 退勤していない人にメッセージを送る
-  Timesheets.prototype.confirmSignOut = function(username, message) {
+  Timesheets.prototype.confirmSignOut = function(user_id, message) {
     var dateObj = DateUtils.toDate(DateUtils.now());
     var users = _.compact(_.map(this.storage.getByDate(dateObj), function(row) {
       return _.isDate(row.signIn) && !_.isDate(row.signOut) ? row.user : undefined;
